@@ -87,6 +87,95 @@
    - 影响：反复查找与原生调用开销。  
    - 替代：Awake/Start 缓存引用。
 
+### 3.1 GC 优化要点与代码示例
+GC 优化核心：**减少 C# 堆内存创建，控制高频分配**，尤其避免在 Update/LateUpdate/FixedUpdate 里出现 GC Alloc。
+
+常见高频分配来源：
+- new 对象/集合（List、Dictionary 等）
+- LINQ（Where/Select/ToList 等）
+- 字符串拼接/插值/格式化
+- 装箱/拆箱与非泛型集合
+
+**示例：Update 中的 GC Alloc（坏/好）**
+
+坏例（每帧分配 List 与字符串）：
+```csharp
+using UnityEngine;
+using UnityEngine.UI;
+using System.Collections.Generic;
+
+public class GcAllocBad : MonoBehaviour
+{
+    public Text label;
+    public List<Transform> allTargets = new List<Transform>();
+
+    void Update()
+    {
+        // GC Alloc: 每帧 new 集合
+        var nearTargets = new List<Transform>();
+        foreach (var t in allTargets)
+        {
+            var delta = t.position - transform.position;
+            if (delta.sqrMagnitude < 25f)
+            {
+                nearTargets.Add(t);
+            }
+        }
+
+        // GC Alloc: 每帧字符串拼接
+        label.text = "Near: " + nearTargets.Count;
+    }
+}
+```
+
+好例（复用容器，仅在数据变化时更新字符串）：
+```csharp
+using UnityEngine;
+using UnityEngine.UI;
+using System.Collections.Generic;
+using System.Text;
+
+public class GcAllocBetter : MonoBehaviour
+{
+    public Text label;
+    public List<Transform> allTargets = new List<Transform>();
+
+    private readonly List<Transform> _nearTargets = new List<Transform>(64);
+    private readonly StringBuilder _sb = new StringBuilder(32);
+    private Transform _self;
+    private int _lastCount = -1;
+
+    void Awake()
+    {
+        _self = transform;
+    }
+
+    void Update()
+    {
+        _nearTargets.Clear();
+        for (int i = 0; i < allTargets.Count; i++)
+        {
+            var t = allTargets[i];
+            var delta = t.position - _self.position;
+            if (delta.sqrMagnitude < 25f)
+            {
+                _nearTargets.Add(t);
+            }
+        }
+
+        if (_nearTargets.Count != _lastCount)
+        {
+            _sb.Clear();
+            _sb.Append("Near: ");
+            _sb.Append(_nearTargets.Count);
+            label.text = _sb.ToString();
+            _lastCount = _nearTargets.Count;
+        }
+    }
+}
+```
+说明：上例通过复用 List 与 StringBuilder，并在数据变化时才更新 UI，显著降低了 Update 中的 GC Alloc。
+
 ## 4. 结论
 Unity 性能问题的主要来源是“热路径 CPU 过载”和“频繁 GC”。  
 规范的核心结论是：**热路径不分配、少查找、少分支、少反射、少全局搜索**。  
