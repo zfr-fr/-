@@ -313,10 +313,15 @@ class CodeChecker:
         1. DEBUG_LOG_USAGE - 使用Debug.Log/LogError/LogException等UnityEngine.Debug类的Log函数的调用属于违规，SocLogger的日志调用不违规
         2. NEW_IN_UPDATE_METHOD - 在Update/LateUpdate/FixedUpdate中new引用类型
         3. EMPTY_UPDATE_METHOD - 继承自MonoBehaviour的类中存在空的Update/LateUpdate/FixedUpdate方法
-        4. FIND_FUNCTION_CALLS - 使用Find类函数
+        4. FIND_FUNCTION_CALLS - 仅限以下Find函数调用：
+           GameObject.Find / FindGameObjectWithTag / FindGameObjectsWithTag / FindWithTag，
+           Transform.Find（包含transform.Find），
+           Object.FindObjectOfType / FindObjectsOfType（包含泛型版本），
+           Resources.FindObjectsOfTypeAll
+           其他函数不属于Find类函数（例如：GetComponent/GetComponents、Object.Destroy等）
         5. FOREACH_ON_SPECIFIC_CONTAINERS - 对SortedDictionary/Hashtable等枚举器是引用类型的容器进行枚举
-        6. GET_COMPONENTS_IN_CHILDREN - GetComponentsInChildren调用
-        7. GET_COMPONENTS_IN_PARENT - GetComponentsInParent调用
+        6. GET_COMPONENTS_IN_CHILDREN - 仅GetComponentsInChildren调用（不包含GetComponent/GetComponentInChildren）
+        7. GET_COMPONENTS_IN_PARENT - 仅GetComponentsInParent调用（不包含GetComponent/GetComponentInParent）
         8. COMPUTE_BUFFER_GETDATA - ComputeBuffer.GetData调用
         9. TEXTURE_GETPIXELS_CALL - Texture.GetPixels/GetPixels32调用
         10. TEXTASSET_BYTES_USAGE - TextAsset.bytes调用
@@ -566,6 +571,43 @@ class CodeChecker:
                             print(f"跳过非Debug.Log调用: {line_content}")
                             continue
 
+                    if rule == "FIND_FUNCTION_CALLS":
+                        find_patterns = [
+                            r"\bGameObject\.Find\s*\(",
+                            r"\bGameObject\.FindGameObjectWithTag\s*\(",
+                            r"\bGameObject\.FindGameObjectsWithTag\s*\(",
+                            r"\bGameObject\.FindWithTag\s*\(",
+                            r"\bTransform\.Find\s*\(",
+                            r"\btransform\.Find\s*\(",
+                            r"\bObject\.FindObjectOfType\s*(<|\()",
+                            r"\bObject\.FindObjectsOfType\s*(<|\()",
+                            r"\bFindObjectOfType\s*(<|\()",
+                            r"\bFindObjectsOfType\s*(<|\()",
+                            r"\bResources\.FindObjectsOfTypeAll\s*(<|\()",
+                        ]
+
+                        if not any(
+                            re.search(pattern, line_content) for pattern in find_patterns
+                        ):
+                            print(f"跳过非Find函数调用: {line_content}")
+                            continue
+
+                    if rule == "GET_COMPONENTS_IN_CHILDREN":
+                        if not re.search(
+                            r"\bGetComponentsInChildren\s*(<|\()",
+                            line_content,
+                        ):
+                            print(f"跳过非GetComponentsInChildren调用: {line_content}")
+                            continue
+
+                    if rule == "GET_COMPONENTS_IN_PARENT":
+                        if not re.search(
+                            r"\bGetComponentsInParent\s*(<|\()",
+                            line_content,
+                        ):
+                            print(f"跳过非GetComponentsInParent调用: {line_content}")
+                            continue
+
                     # 验证行号是否存在映射中
                     if reported_line in line_mapping:
                         # 使用映射中的原始内容
@@ -738,7 +780,9 @@ class CodeChecker:
 1. 报告的行号是原始文件中的准确行号
 2. DEBUG_LOG_USAGE规则只适用于Unity的Debug类（Debug.Log, Debug.LogError等）
 3. 不要将logger.InfoFormat, logger.ErrorFormat等误报为DEBUG_LOG_USAGE
-4. 行号必须与代码中"LXXX:"格式的行号完全一致""",
+4. FIND_FUNCTION_CALLS仅限指定的Find函数，不包括GetComponent/GetComponents或Object.Destroy
+5. GET_COMPONENTS_IN_CHILDREN/GET_COMPONENTS_IN_PARENT仅限对应函数名调用
+6. 行号必须与代码中"LXXX:"格式的行号完全一致""",
                     },
                     {"role": "user", "content": prompt},
                 ],
