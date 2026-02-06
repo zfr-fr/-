@@ -238,6 +238,8 @@ class CodeChecker:
         self.use_cache = use_cache
         self.cache_dir = Path(cache_dir)
         self.rate_limit_delay = rate_limit_delay
+        # 缓存版本，用于规则变更后强制失效
+        self.cache_version = "v2"
 
         # 初始化缓存
         if self.use_cache:
@@ -272,7 +274,7 @@ class CodeChecker:
             with open(file_path, "rb") as f:
                 content_hash.update(f.read())
             # 结合修改时间
-            return f"{content_hash.hexdigest()}_{stat.st_mtime}"
+            return f"{self.cache_version}_{content_hash.hexdigest()}_{stat.st_mtime}"
         except:
             return ""
 
@@ -531,6 +533,9 @@ class CodeChecker:
                     line_content = v.get("line_content", "")
                     rule = v.get("rule", "")
                     description = v.get("description", "")
+                    candidate_content = line_content
+                    if reported_line in line_mapping:
+                        candidate_content = line_mapping[reported_line]
 
                     # 先进行误报过滤
                     if rule == "DEBUG_LOG_USAGE":
@@ -543,7 +548,7 @@ class CodeChecker:
 
                         is_debug_log = False
                         for pattern in debug_patterns:
-                            if re.search(pattern, line_content, re.IGNORECASE):
+                            if re.search(pattern, candidate_content, re.IGNORECASE):
                                 is_debug_log = True
                                 break
 
@@ -559,18 +564,18 @@ class CodeChecker:
 
                         is_allowed_log = False
                         for pattern in allowed_patterns:
-                            if re.search(pattern, line_content, re.IGNORECASE):
+                            if re.search(pattern, candidate_content, re.IGNORECASE):
                                 is_allowed_log = True
                                 break
 
                         # 如果是允许的日志格式，跳过这个违规
                         if is_allowed_log:
-                            print(f"跳过允许的日志调用: {line_content}")
+                            print(f"跳过允许的日志调用: {candidate_content}")
                             continue
 
                         # 如果不是Debug.Log且不是允许的日志，也不应该报告为DEBUG_LOG_USAGE
                         if not is_debug_log:
-                            print(f"跳过非Debug.Log调用: {line_content}")
+                            print(f"跳过非Debug.Log调用: {candidate_content}")
                             continue
 
                     if rule == "FOREACH_ON_SPECIFIC_CONTAINERS":
@@ -595,10 +600,10 @@ class CodeChecker:
                             )
 
                         if not (
-                            contains_allowed(line_content)
+                            contains_allowed(candidate_content)
                             or contains_allowed(description)
                         ):
-                            print(f"跳过非指定容器foreach: {line_content}")
+                            print(f"跳过非指定容器foreach: {candidate_content}")
                             continue
 
                     if rule == "FIND_FUNCTION_CALLS":
@@ -617,25 +622,26 @@ class CodeChecker:
                         ]
 
                         if not any(
-                            re.search(pattern, line_content) for pattern in find_patterns
+                            re.search(pattern, candidate_content)
+                            for pattern in find_patterns
                         ):
-                            print(f"跳过非Find函数调用: {line_content}")
+                            print(f"跳过非Find函数调用: {candidate_content}")
                             continue
 
                     if rule == "GET_COMPONENTS_IN_CHILDREN":
                         if not re.search(
                             r"\bGetComponentsInChildren\s*(<|\()",
-                            line_content,
+                            candidate_content,
                         ):
-                            print(f"跳过非GetComponentsInChildren调用: {line_content}")
+                            print(f"跳过非GetComponentsInChildren调用: {candidate_content}")
                             continue
 
                     if rule == "GET_COMPONENTS_IN_PARENT":
                         if not re.search(
                             r"\bGetComponentsInParent\s*(<|\()",
-                            line_content,
+                            candidate_content,
                         ):
-                            print(f"跳过非GetComponentsInParent调用: {line_content}")
+                            print(f"跳过非GetComponentsInParent调用: {candidate_content}")
                             continue
 
                     # 验证行号是否存在映射中
