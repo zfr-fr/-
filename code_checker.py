@@ -239,7 +239,7 @@ class CodeChecker:
         self.cache_dir = Path(cache_dir)
         self.rate_limit_delay = rate_limit_delay
         # 缓存版本，用于规则变更后强制失效
-        self.cache_version = "v2"
+        self.cache_version = "v3"
 
         # 初始化缓存
         if self.use_cache:
@@ -335,7 +335,7 @@ class CodeChecker:
         14. ONGUI_METHOD_PRESENT - OnGUI方法存在
         15. SENDMESSAGE_USAGE - GameObject.SendMessage调用
         16. TEXTURE_SETPIXELS_CALL - Texture.SetPixels调用
-        17. HEAP_ALLOCATING_STRING_OPS - 堆内存分配的字符串操作
+        17. HEAP_ALLOCATING_STRING_OPS - 堆内存分配的字符串操作（例如：+拼接、$""插值、string.Format/Concat/Join、Substring/Replace/Trim/ToUpper/ToLower/Split、ToString、新建string）
         18. TAG_PROPERTY_USAGE - .tag属性调用
         19. LINQ_USAGE - Linq函数调用
         20. REFLECTION_USAGE - 反射函数调用
@@ -515,6 +515,27 @@ class CodeChecker:
         except:
             return None
 
+    def _is_string_allocation_line(self, line: str) -> bool:
+        """
+        判断该行是否包含明显的字符串分配操作
+        仅用于过滤误报（宁可少报，也不误报）
+        """
+        if not line:
+            return False
+
+        patterns = [
+            r'\$@?"',  # 字符串插值 $"" 或 $@""
+            r'".*"\s*\+',  # 字符串字面量拼接
+            r'\+\s*".*"',  # 字符串字面量拼接
+            r"\bstring\.(Concat|Format|Join)\s*\(",
+            r"\bString\.(Concat|Format|Join)\s*\(",
+            r"\bnew\s+string\s*\(",
+            r"\.ToString\s*\(",
+            r"\.(Substring|Replace|ToUpper|ToLower|Trim|TrimStart|TrimEnd|PadLeft|PadRight|Insert|Remove|Split)\s*\(",
+        ]
+
+        return any(re.search(pattern, line) for pattern in patterns)
+
     def _parse_api_response(
         self, response_text: str, line_mapping: Dict[int, str]
     ) -> List[Violation]:
@@ -604,6 +625,15 @@ class CodeChecker:
                             or contains_allowed(description)
                         ):
                             print(f"跳过非指定容器foreach: {candidate_content}")
+                            continue
+
+                    if rule == "HEAP_ALLOCATING_STRING_OPS":
+                        if "误报" in description or "请忽略" in description:
+                            print(f"跳过标记为误报的字符串分配: {description}")
+                            continue
+
+                        if not self._is_string_allocation_line(candidate_content):
+                            print(f"跳过无明显字符串分配: {candidate_content}")
                             continue
 
                     if rule == "FIND_FUNCTION_CALLS":
@@ -819,7 +849,8 @@ class CodeChecker:
 4. FIND_FUNCTION_CALLS仅限指定的Find函数，不包括GetComponent/GetComponents或Object.Destroy
 5. GET_COMPONENTS_IN_CHILDREN/GET_COMPONENTS_IN_PARENT仅限对应函数名调用
 6. FOREACH_ON_SPECIFIC_CONTAINERS仅限指定容器类型，List等不违规
-7. 行号必须与代码中"LXXX:"格式的行号完全一致""",
+7. HEAP_ALLOCATING_STRING_OPS仅在代码行出现明确字符串分配操作时报告
+8. 行号必须与代码中"LXXX:"格式的行号完全一致""",
                     },
                     {"role": "user", "content": prompt},
                 ],
