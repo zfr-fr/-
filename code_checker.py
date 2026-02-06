@@ -319,7 +319,9 @@ class CodeChecker:
            Object.FindObjectOfType / FindObjectsOfType（包含泛型版本），
            Resources.FindObjectsOfTypeAll
            其他函数不属于Find类函数（例如：GetComponent/GetComponents、Object.Destroy等）
-        5. FOREACH_ON_SPECIFIC_CONTAINERS - 对SortedDictionary/Hashtable等枚举器是引用类型的容器进行枚举
+        5. FOREACH_ON_SPECIFIC_CONTAINERS - 仅当foreach遍历以下容器类型时违规：
+           SortedDictionary / Hashtable / BitArray / Queue / SortedList / ArrayList / Stack
+           其他容器（如 List/Dictionary/HashSet 等）不属于违规
         6. GET_COMPONENTS_IN_CHILDREN - 仅GetComponentsInChildren调用（不包含GetComponent/GetComponentInChildren）
         7. GET_COMPONENTS_IN_PARENT - 仅GetComponentsInParent调用（不包含GetComponent/GetComponentInParent）
         8. COMPUTE_BUFFER_GETDATA - ComputeBuffer.GetData调用
@@ -571,6 +573,34 @@ class CodeChecker:
                             print(f"跳过非Debug.Log调用: {line_content}")
                             continue
 
+                    if rule == "FOREACH_ON_SPECIFIC_CONTAINERS":
+                        if "误报" in description or "请忽略" in description:
+                            print(f"跳过标记为误报的foreach: {description}")
+                            continue
+
+                        allowed_containers = [
+                            "SortedDictionary",
+                            "Hashtable",
+                            "BitArray",
+                            "Queue",
+                            "SortedList",
+                            "ArrayList",
+                            "Stack",
+                        ]
+
+                        def contains_allowed(text: str) -> bool:
+                            return any(
+                                re.search(rf"\b{re.escape(name)}\b", text)
+                                for name in allowed_containers
+                            )
+
+                        if not (
+                            contains_allowed(line_content)
+                            or contains_allowed(description)
+                        ):
+                            print(f"跳过非指定容器foreach: {line_content}")
+                            continue
+
                     if rule == "FIND_FUNCTION_CALLS":
                         find_patterns = [
                             r"\bGameObject\.Find\s*\(",
@@ -782,7 +812,8 @@ class CodeChecker:
 3. 不要将logger.InfoFormat, logger.ErrorFormat等误报为DEBUG_LOG_USAGE
 4. FIND_FUNCTION_CALLS仅限指定的Find函数，不包括GetComponent/GetComponents或Object.Destroy
 5. GET_COMPONENTS_IN_CHILDREN/GET_COMPONENTS_IN_PARENT仅限对应函数名调用
-6. 行号必须与代码中"LXXX:"格式的行号完全一致""",
+6. FOREACH_ON_SPECIFIC_CONTAINERS仅限指定容器类型，List等不违规
+7. 行号必须与代码中"LXXX:"格式的行号完全一致""",
                     },
                     {"role": "user", "content": prompt},
                 ],
