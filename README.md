@@ -28,3 +28,6 @@ Notes:
 
 - Only files under `--project-root` are compared. Entries outside that path
   are ignored in both JSON and Excel data.
+- Use `--debug-rule REFLECTION_USAGE` (repeatable, or `--debug-rule *`) to
+  print per-rule counts and sample differences. Combine with `--debug-file`
+  to focus on a single file name.

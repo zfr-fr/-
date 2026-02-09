@@ -419,6 +419,7 @@ def build_rule_report(
 ) -> Dict[str, object]:
     only_json = sorted(json_set - excel_set, key=lambda item: (resolver.display_for_key(item[0]), item[1]))
     only_excel = sorted(excel_set - json_set, key=lambda item: (resolver.display_for_key(item[0]), item[1]))
+    matched = json_set & excel_set
 
     def build_entries(items: Iterable[Tuple[str, int]], side: str) -> List[Dict[str, object]]:
         entries: List[Dict[str, object]] = []
@@ -455,6 +456,9 @@ def build_rule_report(
         "rule": rule,
         "excel_file": excel_file,
         "presence": presence,
+        "json_count": len(json_set),
+        "excel_count": len(excel_set),
+        "matched_count": len(matched),
         "only_in_json_count": len(only_json),
         "only_in_excel_count": len(only_excel),
         "only_in_json": build_entries(only_json, "only_in_json"),
@@ -499,7 +503,37 @@ def parse_args() -> argparse.Namespace:
         default="**/*.xlsx",
         help="Glob pattern for Excel files (relative to excel-dir).",
     )
+    parser.add_argument(
+        "--debug-rule",
+        action="append",
+        default=[],
+        help="Print debug output for specific rule(s). Repeatable.",
+    )
+    parser.add_argument(
+        "--debug-limit",
+        type=int,
+        default=50,
+        help="Max debug entries per section.",
+    )
+    parser.add_argument(
+        "--debug-file",
+        help="Only show debug entries whose file contains this substring.",
+    )
     return parser.parse_args()
+
+
+def _format_entry(resolver: PathNormalizer, item: Tuple[str, int]) -> str:
+    path_key, line = item
+    return f"{resolver.display_for_key(path_key)}:{line}"
+
+
+def _filter_by_file(
+    resolver: PathNormalizer, items: Iterable[Tuple[str, int]], file_filter: Optional[str]
+) -> List[Tuple[str, int]]:
+    if not file_filter:
+        return list(items)
+    token = file_filter.lower()
+    return [item for item in items if token in resolver.display_for_key(item[0]).lower()]
 
 
 def main() -> int:
@@ -574,6 +608,41 @@ def main() -> int:
             rule for rule in json_violations.keys() if rule not in excel_violations
         ),
     }
+
+    debug_rules = [rule.strip() for rule in args.debug_rule if rule.strip()]
+    if debug_rules:
+        limit = max(0, args.debug_limit)
+        file_filter = args.debug_file
+        if "*" in debug_rules:
+            debug_rules = all_rules
+        for rule in debug_rules:
+            json_set = json_violations.get(rule, set())
+            excel_set = excel_violations.get(rule, set())
+            json_set = set(_filter_by_file(normalizer, json_set, file_filter))
+            excel_set = set(_filter_by_file(normalizer, excel_set, file_filter))
+            matched = json_set & excel_set
+            only_json = sorted(json_set - excel_set, key=lambda item: (_format_entry(normalizer, item)))
+            only_excel = sorted(excel_set - json_set, key=lambda item: (_format_entry(normalizer, item)))
+            matched_sorted = sorted(matched, key=lambda item: (_format_entry(normalizer, item)))
+
+            print(f"\n[DEBUG] Rule: {rule}")
+            print(f"  JSON count: {len(json_set)}")
+            print(f"  Excel count: {len(excel_set)}")
+            print(f"  Matched count: {len(matched)}")
+            if file_filter:
+                print(f"  File filter: {file_filter}")
+            if only_json:
+                print("  JSON only:")
+                for item in only_json[:limit]:
+                    print(f"    - {_format_entry(normalizer, item)}")
+            if only_excel:
+                print("  Excel only:")
+                for item in only_excel[:limit]:
+                    print(f"    - {_format_entry(normalizer, item)}")
+            if matched_sorted and limit > 0:
+                print("  Matched:")
+                for item in matched_sorted[:limit]:
+                    print(f"    - {_format_entry(normalizer, item)}")
 
     report = {
         "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
