@@ -26,6 +26,7 @@ TOKEN_RE = re.compile(r'"([^"]*)"|([A-Za-z]{1,3}\d+)')
 QUOTED_RE = re.compile(r'"([^"]*)"')
 PATH_IN_SEGMENT_RE = re.compile(r"([A-Za-z0-9_./\\\\-]+?\\.cs)", re.IGNORECASE)
 ZERO_WIDTH_CHARS = "\ufeff\u200b\u200e\u200f"
+EXTRA_SPACE_CHARS = "\u00a0\u3000"
 
 
 DEFAULT_RULE_KEYWORDS: Dict[str, List[str]] = {
@@ -116,6 +117,8 @@ class ExcelSheetInfo:
     column_index: Optional[int]
     parsed_entries: int
     raw_entries: int
+    in_scope_entries: int
+    out_scope_entries: int
     non_empty_cells: int
     sample_values: List[str] = field(default_factory=list)
 
@@ -123,7 +126,7 @@ class ExcelSheetInfo:
 def clean_text(value: str) -> str:
     if not value:
         return ""
-    for char in ZERO_WIDTH_CHARS:
+    for char in ZERO_WIDTH_CHARS + EXTRA_SPACE_CHARS:
         value = value.replace(char, "")
     return value.strip()
 
@@ -394,6 +397,15 @@ def parse_ext_attr1(value: object) -> Iterable[Tuple[str, int]]:
         trailing = segment[match.end() :]
         for number in parse_line_numbers(trailing):
             results.append((path_part, number))
+    if not results:
+        paths = PATH_IN_SEGMENT_RE.findall(text)
+        numbers = parse_line_numbers(text)
+        for path_part in paths:
+            path_part = clean_text(path_part)
+            if not path_part:
+                continue
+            for number in numbers:
+                results.append((path_part, number))
     return results
 
 
@@ -473,6 +485,8 @@ def load_excel_violations(
                             column_index=None,
                             parsed_entries=0,
                             raw_entries=0,
+                            in_scope_entries=0,
+                            out_scope_entries=0,
                             non_empty_cells=0,
                             sample_values=[],
                         )
@@ -484,6 +498,8 @@ def load_excel_violations(
             non_empty_cells = 0
             sample_values: List[str] = []
             raw_entries = 0
+            in_scope_entries = 0
+            out_scope_entries = 0
             for row in sheet.iter_rows(min_row=header_row + 1, values_only=False):
                 if not row or len(row) < column_index:
                     continue
@@ -524,7 +540,9 @@ def load_excel_violations(
                     if scope_stats:
                         scope_stats.record(f"{path_value}:{line_number}", in_scope, scope_limit)
                     if not in_scope:
+                        out_scope_entries += 1
                         continue
+                    in_scope_entries += 1
                     key = normalizer.register(path_value)
                     results.add((key, line_number))
             parsed_entries = len(results) - before_count
@@ -536,6 +554,8 @@ def load_excel_violations(
                         column_index=column_index,
                         parsed_entries=parsed_entries,
                         raw_entries=raw_entries,
+                        in_scope_entries=in_scope_entries,
+                        out_scope_entries=out_scope_entries,
                         non_empty_cells=non_empty_cells,
                         sample_values=sample_values,
                     )
@@ -598,6 +618,11 @@ def match_rule_for_excel(
         return excel_to_rule[name_lower]
     if stem_lower in excel_to_rule:
         return excel_to_rule[stem_lower]
+
+    if "sharedmaterials" in name_lower:
+        return "RENDERER_SHAREDMATERIALS_GETTER"
+    if "material_materials" in name_lower:
+        return "RENDERER_MATERIAL_GETTER"
 
     best_rule: Optional[str] = None
     best_score = 0
@@ -827,12 +852,14 @@ def main() -> int:
                 else:
                     print(
                         f"  - Sheet {info.sheet}: ext_attr1 at row {info.header_row}, "
-                        f"col {info.column_index}, raw {info.raw_entries}, parsed {info.parsed_entries}, "
-                        f"non-empty {info.non_empty_cells}"
+                        f"col {info.column_index}, raw {info.raw_entries}, "
+                        f"in-scope {info.in_scope_entries}, out-scope {info.out_scope_entries}, "
+                        f"parsed {info.parsed_entries}, non-empty {info.non_empty_cells}"
                     )
                     if info.sample_values:
                         for sample in info.sample_values:
                             print(f"    sample: {sample}")
+                            print(f"      repr: {sample!r}")
 
     json_violations = load_json_violations(
         json_path,
