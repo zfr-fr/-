@@ -48,6 +48,8 @@ class CheckResult:
     total_violations: int
     total_files: int
     files: List[FileResult]
+    start_time: str = ""
+    duration_seconds: float = 0.0
 
 
 class GitInfoExtractor:
@@ -986,7 +988,9 @@ def save_result_to_json(result: CheckResult, output_file: str = "code_check_resu
     files_with_violations = [f for f in result.files if f.violations_count > 0]
 
     result_dict = {
+        "start_time": result.start_time,
         "check_time": result.check_time,
+        "duration_seconds": result.duration_seconds,
         "total_violations": result.total_violations,
         "total_files": result.total_files,  # 总检查文件数
         "files_with_violations": len(files_with_violations),  # 有违规的文件数
@@ -1023,7 +1027,11 @@ def print_summary(result: CheckResult):
     print(f"\n{'='*60}")
     print("检查完成!")
     print(f"{'='*60}")
-    print(f"检查时间: {result.check_time}")
+    if result.start_time:
+        print(f"开始时间: {result.start_time}")
+    print(f"结束时间: {result.check_time}")
+    if result.duration_seconds:
+        print(f"总耗时: {result.duration_seconds:.2f} 秒")
     print(f"检查文件数: {result.total_files}")
     print(f"有违规的文件数: {files_with_violations}")
     print(f"总违规数: {result.total_violations}")
@@ -1056,6 +1064,9 @@ def main():
     parser.add_argument("--rate-limit", type=float, default=0.1, help="API调用延迟秒数 (默认: 0.1)")
 
     args = parser.parse_args()
+
+    start_timestamp = time.time()
+    start_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
@@ -1096,6 +1107,12 @@ def main():
     else:
         print(f"开始检查目录: {path}")
         result = checker.check_directory(path)
+
+    end_timestamp = time.time()
+    end_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    result.start_time = start_time_str
+    result.check_time = end_time_str
+    result.duration_seconds = round(end_timestamp - start_timestamp, 3)
 
     save_result_to_json(result, args.output)
     print_summary(result)
