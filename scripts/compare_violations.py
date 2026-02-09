@@ -116,6 +116,7 @@ class PathNormalizer:
         ]
         self.anchors = [normalize_slashes(anchor).strip("/") for anchor in anchors if anchor]
         self.anchor_tails = self._build_anchor_tails()
+        self.anchor_tail = self._select_anchor_tail()
         self.display_by_key: Dict[str, str] = {}
         self.candidates_by_key: Dict[str, List[Path]] = {}
 
@@ -128,6 +129,11 @@ class PathNormalizer:
                 tail = self.project_root_norm[index:].rstrip("/")
                 tails.append(tail)
         return tails
+
+    def _select_anchor_tail(self) -> Optional[str]:
+        if not self.anchor_tails:
+            return None
+        return max(self.anchor_tails, key=len)
 
     def is_in_scope(self, raw_path: str) -> bool:
         path = normalize_slashes(raw_path.strip().strip('"')).rstrip("/")
@@ -152,6 +158,18 @@ class PathNormalizer:
 
     def normalize_display(self, raw_path: str) -> str:
         path = normalize_slashes(raw_path.strip().strip('"'))
+        if is_abs(path):
+            path_norm = path.rstrip("/")
+            path_lower = path_norm.lower()
+            if path_lower == self.project_root_norm_lower:
+                if self.anchor_tail:
+                    return self.anchor_tail
+                return ""
+            if path_lower.startswith(self.project_root_norm_lower + "/"):
+                rel = path_norm[len(self.project_root_norm) + 1 :]
+                if self.anchor_tail:
+                    return f"{self.anchor_tail}/{rel}"
+                return rel
         for prefix in self.strip_prefixes:
             prefix_lower = prefix.lower()
             if path.lower().startswith(prefix_lower + "/"):
