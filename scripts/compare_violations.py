@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -85,6 +86,23 @@ DEFAULT_RULE_KEYWORDS: Dict[str, List[str]] = {
     "LINQ_USAGE": ["linq"],
     "REFLECTION_USAGE": ["reflection", "反射", "getinterface"],
 }
+
+
+@dataclass
+class ScopeStats:
+    total: int = 0
+    in_scope: int = 0
+    out_scope: int = 0
+    out_samples: List[str] = field(default_factory=list)
+
+    def record(self, entry: str, in_scope: bool, limit: int) -> None:
+        self.total += 1
+        if in_scope:
+            self.in_scope += 1
+            return
+        self.out_scope += 1
+        if limit > 0 and len(self.out_samples) < limit:
+            self.out_samples.append(entry)
 
 
 def normalize_slashes(value: str) -> str:
@@ -297,6 +315,8 @@ def iter_json_violations(data: object) -> Iterable[Tuple[str, str, int]]:
                     continue
                 file_path = violation.get("file") or violation.get("path") or entry_file
                 rule = violation.get("rule") or violation.get("rule_code")
+                if isinstance(rule, str):
+                    rule = rule.strip()
                 line_value = (
                     violation.get("line")
                     or violation.get("line_number")
@@ -307,6 +327,8 @@ def iter_json_violations(data: object) -> Iterable[Tuple[str, str, int]]:
                         yield str(file_path), str(rule), number
         else:
             rule = entry.get("rule") or entry.get("rule_code")
+            if isinstance(rule, str):
+                rule = rule.strip()
             line_value = entry.get("line") or entry.get("line_number") or entry.get("line_no")
             for number in parse_line_numbers(line_value):
                 if entry_file and rule:
@@ -325,7 +347,10 @@ def find_ext_attr1_column(sheet) -> Optional[int]:
 
 
 def load_excel_violations(
-    excel_path: Path, normalizer: PathNormalizer
+    excel_path: Path,
+    normalizer: PathNormalizer,
+    scope_stats: Optional[ScopeStats] = None,
+    scope_limit: int = 0,
 ) -> Set[Tuple[str, int]]:
     workbook = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
     try:
@@ -340,7 +365,10 @@ def load_excel_violations(
                 continue
             value = row[column_index - 1]
             for path_value, line_number in parse_ext_attr1(value):
-                if not normalizer.is_in_scope(path_value):
+                in_scope = normalizer.is_in_scope(path_value)
+                if scope_stats:
+                    scope_stats.record(f"{path_value}:{line_number}", in_scope, scope_limit)
+                if not in_scope:
                     continue
                 key = normalizer.register(path_value)
                 results.add((key, line_number))
@@ -350,13 +378,19 @@ def load_excel_violations(
 
 
 def load_json_violations(
-    json_path: Path, normalizer: PathNormalizer
+    json_path: Path,
+    normalizer: PathNormalizer,
+    scope_stats: Optional[ScopeStats] = None,
+    scope_limit: int = 0,
 ) -> Dict[str, Set[Tuple[str, int]]]:
     with json_path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
     results: Dict[str, Set[Tuple[str, int]]] = {}
     for file_path, rule, line_number in iter_json_violations(data):
-        if not normalizer.is_in_scope(file_path):
+        in_scope = normalizer.is_in_scope(file_path)
+        if scope_stats:
+            scope_stats.record(f"{file_path}:{line_number}", in_scope, scope_limit)
+        if not in_scope:
             continue
         key = normalizer.register(file_path)
         results.setdefault(rule, set()).add((key, line_number))
@@ -519,6 +553,22 @@ def parse_args() -> argparse.Namespace:
         "--debug-file",
         help="Only show debug entries whose file contains this substring.",
     )
+    parser.add_argument(
+        "--list-rules",
+        action="store_true",
+        help="Print rule counts for JSON and Excel data.",
+    )
+    parser.add_argument(
+        "--debug-scope",
+        action="store_true",
+        help="Print how many entries were filtered by project-root scope.",
+    )
+    parser.add_argument(
+        "--debug-scope-limit",
+        type=int,
+        default=20,
+        help="Max filtered entry samples to print.",
+    )
     return parser.parse_args()
 
 
@@ -557,6 +607,9 @@ def main() -> int:
     content_cache = FileContentCache(normalizer)
 
     excel_to_rule = load_rule_map(rule_map_path)
+    json_scope_stats = ScopeStats() if args.debug_scope else None
+    excel_scope_stats = ScopeStats() if args.debug_scope else None
+    scope_limit = max(0, args.debug_scope_limit)
     excel_files = [
         path
         for path in excel_dir.glob(args.excel_glob)
@@ -573,10 +626,39 @@ def main() -> int:
             unmapped_excel_files.append(str(excel_path))
             continue
         excel_file_map[rule] = excel_path.name
-        violations = load_excel_violations(excel_path, normalizer)
+        violations = load_excel_violations(
+            excel_path,
+            normalizer,
+            scope_stats=excel_scope_stats,
+            scope_limit=scope_limit,
+        )
         excel_violations.setdefault(rule, set()).update(violations)
 
-    json_violations = load_json_violations(json_path, normalizer)
+    json_violations = load_json_violations(
+        json_path,
+        normalizer,
+        scope_stats=json_scope_stats,
+        scope_limit=scope_limit,
+    )
+
+    if args.debug_scope:
+        print("\n[DEBUG] Scope filter stats:")
+        if json_scope_stats:
+            print(
+                f"  JSON total={json_scope_stats.total} "
+                f"in_scope={json_scope_stats.in_scope} "
+                f"out_scope={json_scope_stats.out_scope}"
+            )
+            for item in json_scope_stats.out_samples:
+                print(f"    - JSON filtered: {item}")
+        if excel_scope_stats:
+            print(
+                f"  Excel total={excel_scope_stats.total} "
+                f"in_scope={excel_scope_stats.in_scope} "
+                f"out_scope={excel_scope_stats.out_scope}"
+            )
+            for item in excel_scope_stats.out_samples:
+                print(f"    - Excel filtered: {item}")
 
     all_rules = sorted(set(json_violations.keys()) | set(excel_violations.keys()))
     differences: List[Dict[str, object]] = []
@@ -608,6 +690,14 @@ def main() -> int:
             rule for rule in json_violations.keys() if rule not in excel_violations
         ),
     }
+
+    if args.list_rules:
+        print("\n[DEBUG] JSON rules:")
+        for rule, items in sorted(json_violations.items()):
+            print(f"  - {rule}: {len(items)}")
+        print("[DEBUG] Excel rules:")
+        for rule, items in sorted(excel_violations.items()):
+            print(f"  - {rule}: {len(items)}")
 
     debug_rules = [rule.strip() for rule in args.debug_rule if rule.strip()]
     if debug_rules:

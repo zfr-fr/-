@@ -31,3 +31,6 @@ Notes:
 - Use `--debug-rule REFLECTION_USAGE` (repeatable, or `--debug-rule *`) to
   print per-rule counts and sample differences. Combine with `--debug-file`
   to focus on a single file name.
+- Use `--list-rules` to print rule names and counts for JSON/Excel inputs.
+- Use `--debug-scope` to see how many entries were filtered out by
+  `--project-root`.
