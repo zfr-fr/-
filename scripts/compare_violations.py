@@ -22,6 +22,8 @@ except ImportError:
 DEFAULT_ANCHORS = ["Assets/"]
 LINE_NUMBER_RE = re.compile(r"\d+")
 WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+TOKEN_RE = re.compile(r'"([^"]*)"|([A-Za-z]{1,3}\d+)')
+QUOTED_RE = re.compile(r'"([^"]*)"')
 
 
 DEFAULT_RULE_KEYWORDS: Dict[str, List[str]] = {
@@ -111,10 +113,79 @@ class ExcelSheetInfo:
     header_row: Optional[int]
     column_index: Optional[int]
     parsed_entries: int
+    non_empty_cells: int
+    sample_values: List[str] = field(default_factory=list)
 
 
 def normalize_slashes(value: str) -> str:
     return value.replace("\\", "/")
+
+
+def normalize_delimiters(value: str) -> str:
+    return value.translate(str.maketrans({"：": ":", "；": ";", "，": ","}))
+
+
+def column_letters_to_index(letters: str) -> int:
+    value = 0
+    for char in letters.upper():
+        if not ("A" <= char <= "Z"):
+            return 0
+        value = value * 26 + (ord(char) - ord("A") + 1)
+    return value
+
+
+def value_to_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def extract_formula_text(
+    formula: str,
+    sheet,
+    row_cells: Sequence[object],
+    row_index: int,
+) -> str:
+    if not formula:
+        return ""
+    text = formula.lstrip().lstrip("=")
+    upper = text.upper()
+    if "HYPERLINK" in upper:
+        quoted = QUOTED_RE.findall(text)
+        if quoted:
+            for item in reversed(quoted):
+                if "assets/" in item.lower() or ".cs" in item.lower():
+                    return item
+            return quoted[-1]
+    tokens: List[str] = []
+    for match in TOKEN_RE.finditer(text):
+        quoted = match.group(1)
+        if quoted is not None:
+            tokens.append(quoted)
+            continue
+        ref = match.group(2)
+        if not ref:
+            continue
+        col_letters = re.match(r"[A-Za-z]{1,3}", ref)
+        row_digits = re.search(r"\d+", ref)
+        if not col_letters or not row_digits:
+            continue
+        col_index = column_letters_to_index(col_letters.group(0))
+        ref_row = int(row_digits.group(0))
+        if ref_row == row_index and 1 <= col_index <= len(row_cells):
+            ref_value = value_to_text(row_cells[col_index - 1].value)
+            if ref_value:
+                tokens.append(ref_value)
+        else:
+            try:
+                ref_value = value_to_text(sheet[ref].value)
+            except Exception:
+                ref_value = ""
+            if ref_value:
+                tokens.append(ref_value)
+    return "".join(tokens).strip()
 
 
 def is_windows_abs(path: str) -> bool:
@@ -288,7 +359,7 @@ def parse_line_numbers(value: object) -> List[int]:
 def parse_ext_attr1(value: object) -> Iterable[Tuple[str, int]]:
     if value is None:
         return []
-    text = str(value).replace("\n", ";").replace("\r", ";")
+    text = normalize_delimiters(str(value)).replace("\n", ";").replace("\r", ";")
     results: List[Tuple[str, int]] = []
     for segment in text.split(";"):
         segment = segment.strip()
@@ -364,7 +435,7 @@ def load_excel_violations(
     header_scan_rows: Optional[int] = None,
     sheet_infos: Optional[List[ExcelSheetInfo]] = None,
 ) -> Set[Tuple[str, int]]:
-    workbook = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
+    workbook = openpyxl.load_workbook(excel_path, data_only=False, read_only=True)
     try:
         results: Set[Tuple[str, int]] = set()
         any_column_found = False
@@ -373,16 +444,55 @@ def load_excel_violations(
             if not column_info:
                 if sheet_infos is not None:
                     sheet_infos.append(
-                        ExcelSheetInfo(sheet=sheet.title, header_row=None, column_index=None, parsed_entries=0)
+                        ExcelSheetInfo(
+                            sheet=sheet.title,
+                            header_row=None,
+                            column_index=None,
+                            parsed_entries=0,
+                            non_empty_cells=0,
+                            sample_values=[],
+                        )
                     )
                 continue
             any_column_found = True
             column_index, header_row = column_info
             before_count = len(results)
-            for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+            non_empty_cells = 0
+            sample_values: List[str] = []
+            for row in sheet.iter_rows(min_row=header_row + 1, values_only=False):
                 if not row or len(row) < column_index:
                     continue
-                value = row[column_index - 1]
+                row_cells = list(row)
+                row_index = row_cells[0].row
+                cell = row_cells[column_index - 1]
+                value = cell.value
+                if isinstance(value, str) and value.strip().startswith("="):
+                    value = extract_formula_text(value, sheet, row_cells, row_index)
+                value = value_to_text(value)
+                if value:
+                    non_empty_cells += 1
+                    if sheet_infos is not None and len(sample_values) < 5:
+                        sample_values.append(value)
+                if not value:
+                    fallback_parts: List[str] = []
+                    for cell_item in row_cells:
+                        cell_value = cell_item.value
+                        if isinstance(cell_value, str) and cell_value.strip().startswith("="):
+                            cell_value = extract_formula_text(
+                                cell_value, sheet, row_cells, row_index
+                            )
+                        cell_text = value_to_text(cell_value)
+                        if not cell_text:
+                            continue
+                        cell_text_norm = normalize_delimiters(cell_text)
+                        if "assets/" in cell_text_norm.lower() or ".cs" in cell_text_norm.lower():
+                            fallback_parts.append(cell_text_norm)
+                        elif LINE_NUMBER_RE.search(cell_text_norm):
+                            fallback_parts.append(cell_text_norm)
+                    if fallback_parts:
+                        value = ";".join(fallback_parts)
+                if not value:
+                    continue
                 for path_value, line_number in parse_ext_attr1(value):
                     in_scope = normalizer.is_in_scope(path_value)
                     if scope_stats:
@@ -399,6 +509,8 @@ def load_excel_violations(
                         header_row=header_row,
                         column_index=column_index,
                         parsed_entries=parsed_entries,
+                        non_empty_cells=non_empty_cells,
+                        sample_values=sample_values,
                     )
                 )
         if not any_column_found:
@@ -688,8 +800,12 @@ def main() -> int:
                 else:
                     print(
                         f"  - Sheet {info.sheet}: ext_attr1 at row {info.header_row}, "
-                        f"col {info.column_index}, parsed {info.parsed_entries}"
+                        f"col {info.column_index}, parsed {info.parsed_entries}, "
+                        f"non-empty {info.non_empty_cells}"
                     )
+                    if info.sample_values:
+                        for sample in info.sample_values:
+                            print(f"    sample: {sample}")
 
     json_violations = load_json_violations(
         json_path,
