@@ -204,20 +204,88 @@ def load_rule_excel_map(path: Optional[str]) -> Dict[str, Dict[str, List[str]]]:
     return normalized
 
 
+def default_rule_excel_map() -> Dict[str, Dict[str, List[str]]]:
+    return {
+        "DEBUG_LOG_USAGE": {
+            "keywords": ["unityengine.debug类的log函数", "debug类的log函数"],
+        },
+        "NEW_IN_UPDATE_METHOD": {
+            "keywords": ["update中存在引用类型的new操作"],
+        },
+        "EMPTY_UPDATE_METHOD": {
+            "keywords": ["空的update", "lateupdate", "fixedupdate方法的检测数据"],
+        },
+        "FIND_FUNCTION_CALLS": {
+            "keywords": ["find类函数调用"],
+        },
+        "FOREACH_ON_SPECIFIC_CONTAINERS": {
+            "keywords": ["特定容器的foreach遍历"],
+        },
+        "GET_COMPONENTS_IN_CHILDREN": {
+            "keywords": ["getcomponentsinchildren调用"],
+        },
+        "GET_COMPONENTS_IN_PARENT": {
+            "keywords": ["getcomponentsinparent调用"],
+        },
+        "COMPUTE_BUFFER_GETDATA": {
+            "keywords": ["computebuffer.getdata调用"],
+        },
+        "TEXTURE_GETPIXELS_CALL": {
+            "keywords": ["getpixels32", "getpixels", "setpixels_getpixels32"],
+        },
+        "TEXTURE_SETPIXELS_CALL": {
+            "keywords": ["setpixels", "setpixels_getpixels32"],
+        },
+        "TEXTASSET_BYTES_USAGE": {
+            "keywords": ["textasset.www.bytes调用", "textasset.bytes调用"],
+        },
+        "CAMERA_MAIN_USAGE": {
+            "keywords": ["camera.main的调用"],
+        },
+        "RENDERER_MATERIAL_GETTER": {
+            "keywords": ["material_materials的获取"],
+        },
+        "RENDERER_SHAREDMATERIALS_GETTER": {
+            "keywords": ["sharedmaterials的获取"],
+        },
+        "ONGUI_METHOD_PRESENT": {
+            "keywords": ["ongui方法的检测数据"],
+        },
+        "SENDMESSAGE_USAGE": {
+            "keywords": ["gameobject.sendmessage调用"],
+        },
+        "TAG_PROPERTY_USAGE": {
+            "keywords": [".tag的调用"],
+        },
+        "LINQ_USAGE": {
+            "keywords": ["linq相关函数的调用"],
+        },
+        "REFLECTION_USAGE": {
+            "keywords": ["reflection相关函数的调用"],
+        },
+        "HEAP_ALLOCATING_STRING_OPS": {
+            "keywords": ["堆内存分配的字符串操作"],
+        },
+    }
+
+
 def rule_from_excel_filename(
     filename: str, rule_excel_map: Dict[str, Dict[str, List[str]]]
-) -> str:
+) -> List[str]:
     if not filename or not rule_excel_map:
-        return ""
+        return []
     name = os.path.basename(filename).lower()
+    matched: List[str] = []
     for rule, spec in rule_excel_map.items():
         for keyword in spec.get("keywords", []):
             if keyword and keyword in name:
-                return rule
+                matched.append(rule)
+                break
         for pattern in spec.get("regex", []):
             if pattern and re.search(pattern, name):
-                return rule
-    return ""
+                matched.append(rule)
+                break
+    return matched
 
 
 def detect_header(
@@ -328,10 +396,22 @@ def collect_uwa_records(
                 )
                 if source_records:
                     if rule_excel_map and prefer_rule_from_file:
-                        file_rule = rule_from_excel_filename(str(file_path), rule_excel_map)
-                        if file_rule:
+                        file_rules = rule_from_excel_filename(str(file_path), rule_excel_map)
+                        if file_rules:
                             for record in source_records:
-                                record.rule = file_rule
+                                for file_rule in file_rules:
+                                    records.append(
+                                        ViolationRecord(
+                                            file=record.file,
+                                            line=record.line,
+                                            rule=file_rule,
+                                            description=record.description,
+                                            source=record.source,
+                                            sheet=record.sheet,
+                                            row=record.row,
+                                        )
+                                    )
+                            continue
                     records.extend(source_records)
                     continue
 
@@ -350,9 +430,21 @@ def collect_uwa_records(
                     row=row_idx,
                 )
                 if rule_excel_map and prefer_rule_from_file and not record.rule:
-                    file_rule = rule_from_excel_filename(str(file_path), rule_excel_map)
-                    if file_rule:
-                        record.rule = file_rule
+                    file_rules = rule_from_excel_filename(str(file_path), rule_excel_map)
+                    if file_rules:
+                        for file_rule in file_rules:
+                            records.append(
+                                ViolationRecord(
+                                    file=record.file,
+                                    line=record.line,
+                                    rule=file_rule,
+                                    description=record.description,
+                                    source=record.source,
+                                    sheet=record.sheet,
+                                    row=record.row,
+                                )
+                            )
+                        continue
                 records.append(record)
 
     return records
@@ -440,9 +532,9 @@ def apply_canonical_rule(
     if canon in rule_map:
         canon = rule_map[canon]
     if (not canon or prefer_rule_from_file) and record.source and rule_excel_map:
-        file_rule = rule_from_excel_filename(record.source, rule_excel_map)
-        if file_rule:
-            canon = file_rule
+        file_rules = rule_from_excel_filename(record.source, rule_excel_map)
+        if file_rules:
+            canon = file_rules[0]
     return canon or normalize_rule(record.rule)
 
 
@@ -551,6 +643,9 @@ def main():
 
     rule_map = load_rule_map(args.rule_map)
     rule_excel_map = load_rule_excel_map(args.rule_excel_map)
+    if not rule_excel_map:
+        rule_excel_map = default_rule_excel_map()
+    prefer_rule_from_file = args.prefer_rule_from_file or bool(rule_excel_map)
 
     uwa_records = collect_uwa_records(
         uwa_files,
@@ -559,7 +654,7 @@ def main():
         args.sheet,
         args.max_header_scan,
         rule_excel_map,
-        args.prefer_rule_from_file,
+        prefer_rule_from_file,
     )
     local_records = collect_local_records(Path(args.local_json))
     if args.target_path:
@@ -568,11 +663,11 @@ def main():
 
     for record in local_records:
         record.canon_rule = apply_canonical_rule(
-            record, rule_map, rule_excel_map, args.prefer_rule_from_file
+            record, rule_map, rule_excel_map, prefer_rule_from_file
         )
     for record in uwa_records:
         record.canon_rule = apply_canonical_rule(
-            record, rule_map, rule_excel_map, args.prefer_rule_from_file
+            record, rule_map, rule_excel_map, prefer_rule_from_file
         )
 
     local_keys = sorted({normalize_path(record.file) for record in local_records if record.file})
