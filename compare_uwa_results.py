@@ -313,7 +313,7 @@ def detect_header(
 
         has_file = "file" in col_map
         has_line = "line" in col_map
-        has_source = "source_location" in col_map
+        has_source = "source_location" in col_map or "ext_attr1" in col_map
         if score > best_score and ((has_file and has_line) or has_source):
             best_score = score
             best_row = offset
@@ -344,6 +344,7 @@ def collect_uwa_records(
             "资源位置",
             "源位置",
         ],
+        "ext_attr1": ["ext_attr1", "extattr1", "ext attr1"],
     }
 
     records: List[ViolationRecord] = []
@@ -386,6 +387,8 @@ def collect_uwa_records(
                     return "" if value is None else str(value).strip()
 
                 source_val = cell_value("source_location")
+                if not source_val:
+                    source_val = cell_value("ext_attr1")
                 rule_val = cell_value("rule")
                 desc_val = cell_value("desc")
                 if not rule_val and desc_val:
@@ -615,6 +618,7 @@ def main():
     parser.add_argument("--rule-col", type=int, help="规则列(1-based)")
     parser.add_argument("--desc-col", type=int, help="描述列(1-based)")
     parser.add_argument("--source-col", type=int, help="sourceLocation列(1-based)")
+    parser.add_argument("--ext-attr1-col", type=int, help="ext_attr1列(1-based)")
     parser.add_argument("--target-path", help="仅对比指定路径下的文件")
     parser.add_argument("--export-csv", action="store_true", help="额外导出CSV")
 
@@ -639,6 +643,7 @@ def main():
         "rule": args.rule_col,
         "desc": args.desc_col,
         "source_location": args.source_col,
+        "ext_attr1": args.ext_attr1_col,
     }
 
     rule_map = load_rule_map(args.rule_map)
