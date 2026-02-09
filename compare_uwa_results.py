@@ -23,6 +23,8 @@ class ViolationRecord:
     source: str
     sheet: str = ""
     row: Optional[int] = None
+    line_content: str = ""
+    canon_rule: str = ""
 
 
 def normalize_path(path: str) -> str:
@@ -176,6 +178,48 @@ def load_rule_map(path: Optional[str]) -> Dict[str, str]:
     return {normalize_rule(k): normalize_rule(v) for k, v in data.items()}
 
 
+def load_rule_excel_map(path: Optional[str]) -> Dict[str, Dict[str, List[str]]]:
+    if not path:
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    normalized: Dict[str, Dict[str, List[str]]] = {}
+    for rule_key, value in data.items():
+        canon_rule = normalize_rule(rule_key)
+        entry: Dict[str, List[str]] = {"keywords": [], "regex": []}
+        if isinstance(value, str):
+            entry["keywords"] = [value.lower()]
+        elif isinstance(value, list):
+            entry["keywords"] = [str(item).lower() for item in value if item]
+        elif isinstance(value, dict):
+            keywords = value.get("keywords", []) or value.get("keyword", [])
+            regex = value.get("regex", []) or value.get("pattern", [])
+            if isinstance(keywords, str):
+                keywords = [keywords]
+            if isinstance(regex, str):
+                regex = [regex]
+            entry["keywords"] = [str(item).lower() for item in keywords if item]
+            entry["regex"] = [str(item) for item in regex if item]
+        normalized[canon_rule] = entry
+    return normalized
+
+
+def rule_from_excel_filename(
+    filename: str, rule_excel_map: Dict[str, Dict[str, List[str]]]
+) -> str:
+    if not filename or not rule_excel_map:
+        return ""
+    name = os.path.basename(filename).lower()
+    for rule, spec in rule_excel_map.items():
+        for keyword in spec.get("keywords", []):
+            if keyword and keyword in name:
+                return rule
+        for pattern in spec.get("regex", []):
+            if pattern and re.search(pattern, name):
+                return rule
+    return ""
+
+
 def detect_header(
     sheet, max_rows: int, header_aliases: Dict[str, List[str]]
 ) -> Tuple[Optional[int], Dict[str, int]]:
@@ -216,6 +260,8 @@ def collect_uwa_records(
     column_override: Dict[str, Optional[int]],
     sheet_name: Optional[str],
     max_header_scan: int,
+    rule_excel_map: Dict[str, Dict[str, List[str]]],
+    prefer_rule_from_file: bool,
 ) -> List[ViolationRecord]:
     header_aliases = {
         "file": ["file", "path", "文件", "文件名", "文件路径", "脚本", "资源", "pathname"],
@@ -281,6 +327,11 @@ def collect_uwa_records(
                     source_val, rule_val, desc_val, str(file_path), sheet.title, row_idx
                 )
                 if source_records:
+                    if rule_excel_map and prefer_rule_from_file:
+                        file_rule = rule_from_excel_filename(str(file_path), rule_excel_map)
+                        if file_rule:
+                            for record in source_records:
+                                record.rule = file_rule
                     records.extend(source_records)
                     continue
 
@@ -298,6 +349,10 @@ def collect_uwa_records(
                     sheet=sheet.title,
                     row=row_idx,
                 )
+                if rule_excel_map and prefer_rule_from_file and not record.rule:
+                    file_rule = rule_from_excel_filename(str(file_path), rule_excel_map)
+                    if file_rule:
+                        record.rule = file_rule
                 records.append(record)
 
     return records
@@ -318,6 +373,7 @@ def collect_local_records(path: Path) -> List[ViolationRecord]:
                     rule=v.get("rule", ""),
                     description=v.get("description", ""),
                     source="local_json",
+                    line_content=v.get("line_content", ""),
                 )
             )
     return records
@@ -349,6 +405,83 @@ def match_file_candidates(
     return candidates
 
 
+def map_uwa_file_to_local_key(
+    uwa_path: str, local_keys: List[str], mode: str
+) -> Tuple[Optional[str], List[str]]:
+    uwa_norm = normalize_path(uwa_path)
+    candidates = []
+    if mode == "exact":
+        if uwa_norm in local_keys:
+            candidates.append(uwa_norm)
+    elif mode == "basename":
+        uwa_base = os.path.basename(uwa_norm)
+        for key in local_keys:
+            if os.path.basename(key) == uwa_base:
+                candidates.append(key)
+    else:
+        for key in local_keys:
+            if uwa_norm.endswith(key) or key.endswith(uwa_norm):
+                candidates.append(key)
+    if not candidates:
+        return None, []
+    if len(candidates) == 1:
+        return candidates[0], candidates
+    candidates.sort(key=len, reverse=True)
+    return candidates[0], candidates
+
+
+def apply_canonical_rule(
+    record: ViolationRecord,
+    rule_map: Dict[str, str],
+    rule_excel_map: Dict[str, Dict[str, List[str]]],
+    prefer_rule_from_file: bool,
+) -> str:
+    canon = normalize_rule(record.rule)
+    if canon in rule_map:
+        canon = rule_map[canon]
+    if (not canon or prefer_rule_from_file) and record.source and rule_excel_map:
+        file_rule = rule_from_excel_filename(record.source, rule_excel_map)
+        if file_rule:
+            canon = file_rule
+    return canon or normalize_rule(record.rule)
+
+
+def match_records_by_line(
+    local_records: List[ViolationRecord],
+    uwa_records: List[ViolationRecord],
+    tolerance: int,
+) -> Tuple[List[Tuple[ViolationRecord, ViolationRecord, int]], List[ViolationRecord], List[ViolationRecord]]:
+    local_sorted = sorted([r for r in local_records if r.line is not None], key=lambda r: r.line)
+    uwa_sorted = sorted([r for r in uwa_records if r.line is not None], key=lambda r: r.line)
+    used_uwa = set()
+    matches: List[Tuple[ViolationRecord, ViolationRecord, int]] = []
+    only_local: List[ViolationRecord] = []
+
+    for local in local_sorted:
+        best_index = None
+        best_diff = None
+        for idx, uwa in enumerate(uwa_sorted):
+            if idx in used_uwa:
+                continue
+            diff = abs(local.line - uwa.line)
+            if diff <= tolerance and (best_diff is None or diff < best_diff):
+                best_diff = diff
+                best_index = idx
+        if best_index is not None:
+            used_uwa.add(best_index)
+            matches.append((local, uwa_sorted[best_index], best_diff or 0))
+        else:
+            only_local.append(local)
+
+    only_uwa = [uwa for idx, uwa in enumerate(uwa_sorted) if idx not in used_uwa]
+
+    # 保留缺失行号的记录为未匹配
+    only_local.extend([r for r in local_records if r.line is None])
+    only_uwa.extend([r for r in uwa_records if r.line is None])
+
+    return matches, only_local, only_uwa
+
+
 def is_desc_match(local_desc: str, uwa_desc: str) -> bool:
     local_norm = normalize_desc(local_desc)
     uwa_norm = normalize_desc(uwa_desc)
@@ -375,6 +508,12 @@ def main():
     parser.add_argument("--line-tolerance", type=int, default=3, help="行号容差(默认3)")
     parser.add_argument("--match-by", choices=["rule", "rule+desc"], default="rule")
     parser.add_argument("--rule-map", help="规则映射JSON文件")
+    parser.add_argument("--rule-excel-map", help="规则与Excel文件名映射JSON")
+    parser.add_argument(
+        "--prefer-rule-from-file",
+        action="store_true",
+        help="优先使用Excel文件名映射规则",
+    )
     parser.add_argument("--file-match", choices=["exact", "suffix", "basename"], default="suffix")
     parser.add_argument("--sheet", help="只读取指定sheet")
     parser.add_argument("--max-header-scan", type=int, default=10)
@@ -411,6 +550,7 @@ def main():
     }
 
     rule_map = load_rule_map(args.rule_map)
+    rule_excel_map = load_rule_excel_map(args.rule_excel_map)
 
     uwa_records = collect_uwa_records(
         uwa_files,
@@ -418,117 +558,149 @@ def main():
         column_override,
         args.sheet,
         args.max_header_scan,
+        rule_excel_map,
+        args.prefer_rule_from_file,
     )
     local_records = collect_local_records(Path(args.local_json))
     if args.target_path:
         uwa_records = filter_records_by_path(uwa_records, args.target_path)
         local_records = filter_records_by_path(local_records, args.target_path)
 
-    uwa_by_file: Dict[str, List[ViolationRecord]] = {}
+    for record in local_records:
+        record.canon_rule = apply_canonical_rule(
+            record, rule_map, rule_excel_map, args.prefer_rule_from_file
+        )
     for record in uwa_records:
-        uwa_by_file.setdefault(record.file, []).append(record)
+        record.canon_rule = apply_canonical_rule(
+            record, rule_map, rule_excel_map, args.prefer_rule_from_file
+        )
 
-    uwa_matched = set()
-    matches = []
-    only_local = []
+    local_keys = sorted({normalize_path(record.file) for record in local_records if record.file})
+    display_path_by_key: Dict[str, str] = {}
+    for record in local_records:
+        key = normalize_path(record.file)
+        if key and key not in display_path_by_key:
+            display_path_by_key[key] = record.file
+
     ambiguous = []
-
-    for local in local_records:
-        local_rule = normalize_rule(local.rule)
-        if local_rule in rule_map:
-            local_rule = rule_map[local_rule]
-
-        candidates = match_file_candidates(local.file, uwa_by_file, args.file_match)
-
-        if len(candidates) > 1:
-            ambiguous.append(
-                {
-                    "file": local.file,
-                    "rule": local.rule,
-                    "line": local.line,
-                    "candidates": candidates,
-                }
-            )
-
-        best_match = None
-        best_diff = None
-        best_uwa = None
-
-        for candidate_file in candidates:
-            for uwa in uwa_by_file.get(candidate_file, []):
-                uwa_rule = normalize_rule(uwa.rule)
-                if uwa_rule in rule_map:
-                    uwa_rule = rule_map[uwa_rule]
-
-                if local_rule and uwa_rule and local_rule != uwa_rule:
-                    continue
-
-                if args.match_by == "rule+desc" and not is_desc_match(
-                    local.description, uwa.description
-                ):
-                    continue
-
-                if local.line is None or uwa.line is None:
-                    continue
-
-                diff = abs(local.line - uwa.line)
-                if diff <= args.line_tolerance:
-                    if best_diff is None or diff < best_diff:
-                        best_diff = diff
-                        best_match = candidate_file
-                        best_uwa = uwa
-
-        if best_uwa:
-            uwa_matched.add(id(best_uwa))
-            matches.append(
-                {
-                    "file": local.file,
-                    "rule": local.rule,
-                    "local_line": local.line,
-                    "uwa_line": best_uwa.line,
-                    "line_diff": best_diff,
-                    "uwa_file": best_match,
-                    "uwa_rule": best_uwa.rule,
-                }
-            )
-        else:
-            only_local.append(
-                {
-                    "file": local.file,
-                    "rule": local.rule,
-                    "line": local.line,
-                    "description": local.description,
-                }
-            )
-
-    only_uwa = []
+    uwa_file_key_cache: Dict[str, Optional[str]] = {}
     for record in uwa_records:
-        if id(record) not in uwa_matched:
-            only_uwa.append(
-                {
-                    "file": record.file,
-                    "rule": record.rule,
-                    "line": record.line,
-                    "description": record.description,
-                    "source": record.source,
-                    "sheet": record.sheet,
-                    "row": record.row,
-                }
+        if record.file in uwa_file_key_cache:
+            continue
+        mapped_key, candidates = map_uwa_file_to_local_key(
+            record.file, local_keys, args.file_match
+        )
+        uwa_file_key_cache[record.file] = mapped_key
+        if len(candidates) > 1:
+            ambiguous.append({"uwa_file": record.file, "candidates": candidates})
+
+    rule_results: Dict[str, Dict[str, object]] = {}
+    flat_diffs: List[Dict[str, object]] = []
+    all_rules = sorted(
+        {record.canon_rule for record in local_records + uwa_records if record.canon_rule}
+    )
+
+    for rule in all_rules:
+        local_rule_records = [r for r in local_records if r.canon_rule == rule]
+        uwa_rule_records = [r for r in uwa_records if r.canon_rule == rule]
+
+        local_by_file: Dict[str, List[ViolationRecord]] = {}
+        for record in local_rule_records:
+            key = normalize_path(record.file)
+            local_by_file.setdefault(key, []).append(record)
+
+        uwa_by_file: Dict[str, List[ViolationRecord]] = {}
+        for record in uwa_rule_records:
+            key = uwa_file_key_cache.get(record.file)
+            if not key:
+                key = normalize_path(record.file)
+                if key not in display_path_by_key:
+                    display_path_by_key[key] = record.file
+            uwa_by_file.setdefault(key, []).append(record)
+
+        files = sorted(set(list(local_by_file.keys()) + list(uwa_by_file.keys())))
+        rule_summary = {"matched": 0, "only_local": 0, "only_uwa": 0}
+        file_results: Dict[str, Dict[str, object]] = {}
+
+        for file_key in files:
+            local_list = local_by_file.get(file_key, [])
+            uwa_list = uwa_by_file.get(file_key, [])
+            matches, only_local, only_uwa = match_records_by_line(
+                local_list, uwa_list, args.line_tolerance
             )
+
+            rule_summary["matched"] += len(matches)
+            rule_summary["only_local"] += len(only_local)
+            rule_summary["only_uwa"] += len(only_uwa)
+
+            display_path = display_path_by_key.get(file_key, file_key)
+            file_results[display_path] = {
+                "matches": [
+                    {
+                        "local_line": m[0].line,
+                        "uwa_line": m[1].line,
+                        "line_diff": m[2],
+                    }
+                    for m in matches
+                ],
+                "only_local": [
+                    {
+                        "line": r.line,
+                        "line_content": r.line_content,
+                        "description": r.description,
+                    }
+                    for r in only_local
+                ],
+                "only_uwa": [
+                    {
+                        "line": r.line,
+                        "description": r.description,
+                        "source": r.source,
+                        "sheet": r.sheet,
+                        "row": r.row,
+                    }
+                    for r in only_uwa
+                ],
+            }
+
+            for r in only_local:
+                flat_diffs.append(
+                    {
+                        "rule": rule,
+                        "file": display_path,
+                        "line": r.line,
+                        "line_content": r.line_content,
+                        "side": "only_json",
+                    }
+                )
+            for r in only_uwa:
+                flat_diffs.append(
+                    {
+                        "rule": rule,
+                        "file": display_path,
+                        "line": r.line,
+                        "side": "only_excel",
+                        "source": r.source,
+                        "sheet": r.sheet,
+                        "row": r.row,
+                    }
+                )
+
+        rule_results[rule] = {
+            "summary": rule_summary,
+            "files": file_results,
+        }
 
     output = {
         "summary": {
             "local_total": len(local_records),
             "uwa_total": len(uwa_records),
-            "matched": len(matches),
-            "only_local": len(only_local),
-            "only_uwa": len(only_uwa),
-            "ambiguous": len(ambiguous),
+            "rules": len(rule_results),
+            "ambiguous_files": len(ambiguous),
             "target_path": args.target_path or "",
         },
-        "matches": matches,
-        "only_local": only_local,
-        "only_uwa": only_uwa,
+        "rules": rule_results,
+        "diffs": flat_diffs,
         "ambiguous": ambiguous,
     }
 
@@ -537,9 +709,7 @@ def main():
 
     if args.export_csv:
         base = Path(args.output).with_suffix("")
-        build_output_csv(base.with_name(base.name + "_matches.csv"), matches)
-        build_output_csv(base.with_name(base.name + "_only_local.csv"), only_local)
-        build_output_csv(base.with_name(base.name + "_only_uwa.csv"), only_uwa)
+        build_output_csv(base.with_name(base.name + "_diffs.csv"), flat_diffs)
 
     print(f"对比完成，结果已保存到: {args.output}")
 
