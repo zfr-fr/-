@@ -105,6 +105,14 @@ class ScopeStats:
             self.out_samples.append(entry)
 
 
+@dataclass
+class ExcelSheetInfo:
+    sheet: str
+    header_row: Optional[int]
+    column_index: Optional[int]
+    parsed_entries: int
+
+
 def normalize_slashes(value: str) -> str:
     return value.replace("\\", "/")
 
@@ -335,14 +343,16 @@ def iter_json_violations(data: object) -> Iterable[Tuple[str, str, int]]:
                     yield str(entry_file), str(rule), number
 
 
-def find_ext_attr1_column(sheet) -> Optional[int]:
-    max_scan = min(sheet.max_row or 0, 20)
-    for row_index in range(1, max_scan + 1):
+def find_ext_attr1_column(sheet, max_scan_rows: Optional[int]) -> Optional[Tuple[int, int]]:
+    max_rows = sheet.max_row or 0
+    if max_scan_rows and max_scan_rows > 0:
+        max_rows = min(max_rows, max_scan_rows)
+    for row_index in range(1, max_rows + 1):
         row = sheet[row_index]
         for cell_index, cell in enumerate(row, start=1):
             value = "" if cell.value is None else str(cell.value).strip()
-            if value.lower() == "ext_attr1":
-                return cell_index
+            if "ext_attr1" in value.lower():
+                return cell_index, row_index
     return None
 
 
@@ -351,27 +361,48 @@ def load_excel_violations(
     normalizer: PathNormalizer,
     scope_stats: Optional[ScopeStats] = None,
     scope_limit: int = 0,
+    header_scan_rows: Optional[int] = None,
+    sheet_infos: Optional[List[ExcelSheetInfo]] = None,
 ) -> Set[Tuple[str, int]]:
     workbook = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
     try:
-        sheet = workbook.active
-        column_index = find_ext_attr1_column(sheet)
-        if not column_index:
-            sys.stderr.write(f"No ext_attr1 column found in {excel_path}\n")
-            return set()
         results: Set[Tuple[str, int]] = set()
-        for row in sheet.iter_rows(min_row=1, values_only=True):
-            if not row or len(row) < column_index:
+        any_column_found = False
+        for sheet in workbook.worksheets:
+            column_info = find_ext_attr1_column(sheet, header_scan_rows)
+            if not column_info:
+                if sheet_infos is not None:
+                    sheet_infos.append(
+                        ExcelSheetInfo(sheet=sheet.title, header_row=None, column_index=None, parsed_entries=0)
+                    )
                 continue
-            value = row[column_index - 1]
-            for path_value, line_number in parse_ext_attr1(value):
-                in_scope = normalizer.is_in_scope(path_value)
-                if scope_stats:
-                    scope_stats.record(f"{path_value}:{line_number}", in_scope, scope_limit)
-                if not in_scope:
+            any_column_found = True
+            column_index, header_row = column_info
+            before_count = len(results)
+            for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+                if not row or len(row) < column_index:
                     continue
-                key = normalizer.register(path_value)
-                results.add((key, line_number))
+                value = row[column_index - 1]
+                for path_value, line_number in parse_ext_attr1(value):
+                    in_scope = normalizer.is_in_scope(path_value)
+                    if scope_stats:
+                        scope_stats.record(f"{path_value}:{line_number}", in_scope, scope_limit)
+                    if not in_scope:
+                        continue
+                    key = normalizer.register(path_value)
+                    results.add((key, line_number))
+            parsed_entries = len(results) - before_count
+            if sheet_infos is not None:
+                sheet_infos.append(
+                    ExcelSheetInfo(
+                        sheet=sheet.title,
+                        header_row=header_row,
+                        column_index=column_index,
+                        parsed_entries=parsed_entries,
+                    )
+                )
+        if not any_column_found:
+            sys.stderr.write(f"No ext_attr1 column found in {excel_path}\n")
         return results
     finally:
         workbook.close()
@@ -569,6 +600,17 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Max filtered entry samples to print.",
     )
+    parser.add_argument(
+        "--debug-excel",
+        action="store_true",
+        help="Print per-excel sheet parsing details.",
+    )
+    parser.add_argument(
+        "--excel-header-scan",
+        type=int,
+        default=500,
+        help="Max rows to scan for ext_attr1 header (0 for all).",
+    )
     return parser.parse_args()
 
 
@@ -626,13 +668,28 @@ def main() -> int:
             unmapped_excel_files.append(str(excel_path))
             continue
         excel_file_map[rule] = excel_path.name
+        sheet_infos: List[ExcelSheetInfo] = []
         violations = load_excel_violations(
             excel_path,
             normalizer,
             scope_stats=excel_scope_stats,
             scope_limit=scope_limit,
+            header_scan_rows=args.excel_header_scan,
+            sheet_infos=sheet_infos if args.debug_excel else None,
         )
         excel_violations.setdefault(rule, set()).update(violations)
+        if args.debug_excel:
+            print(f"\n[DEBUG] Excel file: {excel_path.name} -> {rule}")
+            if not sheet_infos:
+                print("  No sheets parsed.")
+            for info in sheet_infos:
+                if info.column_index is None:
+                    print(f"  - Sheet {info.sheet}: ext_attr1 not found")
+                else:
+                    print(
+                        f"  - Sheet {info.sheet}: ext_attr1 at row {info.header_row}, "
+                        f"col {info.column_index}, parsed {info.parsed_entries}"
+                    )
 
     json_violations = load_json_violations(
         json_path,

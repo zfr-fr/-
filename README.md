@@ -34,3 +34,6 @@ Notes:
 - Use `--list-rules` to print rule names and counts for JSON/Excel inputs.
 - Use `--debug-scope` to see how many entries were filtered out by
   `--project-root`.
+- Use `--debug-excel` to show which sheet contains `ext_attr1` and how many
+  entries were parsed. Adjust `--excel-header-scan` if the header row is
+  not near the top.
