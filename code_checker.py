@@ -987,12 +987,21 @@ class CodeChecker:
 def save_result_to_json(result: CheckResult, output_file: str = "code_check_result.json"):
     # 只将有违规的文件写入JSON
     files_with_violations = [f for f in result.files if f.violations_count > 0]
+    total_count = 0
+    false_positive_count = 0
+    for file_result in files_with_violations:
+        for violation in file_result.violations:
+            total_count += 1
+            if "误报" in (violation.description or ""):
+                false_positive_count += 1
 
     result_dict = {
         "start_time": result.start_time,
         "end_time": result.end_time,
         "duration_seconds": result.duration_seconds,
         "check_time": result.check_time,
+        "false_positive_rate": f"{false_positive_count}/{total_count}",
+        "false_positive_count": false_positive_count,
         "total_violations": result.total_violations,
         "total_files": result.total_files,  # 总检查文件数
         "files_with_violations": len(files_with_violations),  # 有违规的文件数
