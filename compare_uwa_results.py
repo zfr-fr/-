@@ -77,13 +77,16 @@ def detect_header(
     best_map = {}
     best_score = 0
 
-    for row_idx in range(1, min(max_rows, sheet.max_row) + 1):
-        row_cells = list(sheet[row_idx])
+    max_scan = min(max_rows, sheet.max_row)
+    for offset, row_cells in enumerate(
+        sheet.iter_rows(min_row=1, max_row=max_scan, values_only=True),
+        start=1,
+    ):
         col_map = {}
         score = 0
 
         for col_idx, cell in enumerate(row_cells, 1):
-            value = "" if cell.value is None else str(cell.value).strip().lower()
+            value = "" if cell is None else str(cell).strip().lower()
             for key, aliases in header_aliases.items():
                 if any(alias in value for alias in aliases):
                     if key not in col_map:
@@ -94,7 +97,7 @@ def detect_header(
         has_line = "line" in col_map
         if score > best_score and (has_file and has_line):
             best_score = score
-            best_row = row_idx
+            best_row = offset
             best_map = col_map
 
     return best_row, best_map
@@ -135,8 +138,14 @@ def collect_uwa_records(
             if not header_row or "file" not in col_map or "line" not in col_map:
                 continue
 
-            for row_idx in range(header_row + 1, sheet.max_row + 1):
-                row = sheet[row_idx]
+            for row_idx, row in enumerate(
+                sheet.iter_rows(
+                    min_row=header_row + 1,
+                    max_row=sheet.max_row,
+                    values_only=True,
+                ),
+                start=header_row + 1,
+            ):
 
                 def cell_value(col_key: str) -> str:
                     col = col_map.get(col_key)
@@ -144,7 +153,7 @@ def collect_uwa_records(
                         return ""
                     if col - 1 >= len(row):
                         return ""
-                    value = row[col - 1].value
+                    value = row[col - 1]
                     return "" if value is None else str(value).strip()
 
                 file_val = cell_value("file")
