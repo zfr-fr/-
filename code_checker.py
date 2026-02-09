@@ -49,6 +49,7 @@ class CheckResult:
     total_files: int
     files: List[FileResult]
     start_time: str = ""
+    end_time: str = ""
     duration_seconds: float = 0.0
 
 
@@ -989,8 +990,9 @@ def save_result_to_json(result: CheckResult, output_file: str = "code_check_resu
 
     result_dict = {
         "start_time": result.start_time,
-        "check_time": result.check_time,
+        "end_time": result.end_time,
         "duration_seconds": result.duration_seconds,
+        "check_time": result.check_time,
         "total_violations": result.total_violations,
         "total_files": result.total_files,  # 总检查文件数
         "files_with_violations": len(files_with_violations),  # 有违规的文件数
@@ -1022,21 +1024,7 @@ def save_result_to_json(result: CheckResult, output_file: str = "code_check_resu
 
 
 def print_summary(result: CheckResult):
-    files_with_violations = len([f for f in result.files if f.violations_count > 0])
-
-    print(f"\n{'='*60}")
-    print("检查完成!")
-    print(f"{'='*60}")
-    if result.start_time:
-        print(f"开始时间: {result.start_time}")
-    print(f"结束时间: {result.check_time}")
-    if result.duration_seconds:
-        print(f"总耗时: {result.duration_seconds:.2f} 秒")
-    print(f"检查文件数: {result.total_files}")
-    print(f"有违规的文件数: {files_with_violations}")
-    print(f"总违规数: {result.total_violations}")
-    print(f"{'='*60}")
-    print("详细结果已保存到JSON文件中（只包含有违规的文件）")
+    print(f"总耗时: {result.duration_seconds:.2f} 秒")
 
 
 def main():
@@ -1111,6 +1099,7 @@ def main():
     end_timestamp = time.time()
     end_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     result.start_time = start_time_str
+    result.end_time = end_time_str
     result.check_time = end_time_str
     result.duration_seconds = round(end_timestamp - start_timestamp, 3)
 
