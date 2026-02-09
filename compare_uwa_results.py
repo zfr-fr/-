@@ -62,6 +62,112 @@ def parse_line_number(value) -> Optional[int]:
     return None
 
 
+def extract_line_numbers(text: str) -> List[int]:
+    if not text:
+        return []
+    tokens = re.split(r"[,\s，]+", text)
+    lines: List[int] = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        if re.match(r"^\d+$", token):
+            lines.append(int(token))
+            continue
+        range_match = re.match(r"^(\d+)\s*[-~]\s*(\d+)$", token)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            if start <= end:
+                lines.extend(range(start, end + 1))
+            else:
+                lines.extend(range(end, start + 1))
+            continue
+        maybe = parse_line_number(token)
+        if maybe is not None:
+            lines.append(maybe)
+    return lines
+
+
+def parse_source_location(
+    value: str,
+    rule: str,
+    desc: str,
+    source_file: str,
+    sheet: str,
+    row: int,
+) -> List[ViolationRecord]:
+    if not value:
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+
+    records: List[ViolationRecord] = []
+    parts = re.split(r"[|\n]+", text)
+    for part in parts:
+        segment = part.strip()
+        if not segment:
+            continue
+        segment = segment.split(";")[0].strip()
+
+        match = re.search(r"(?P<path>.*?\.cs)\s*:\s*(?P<lines>.+)", segment, re.IGNORECASE)
+        if not match:
+            continue
+
+        file_path = match.group("path").strip()
+        lines_text = match.group("lines").strip()
+        lines = extract_line_numbers(lines_text)
+        if not lines:
+            records.append(
+                ViolationRecord(
+                    file=file_path,
+                    line=None,
+                    rule=rule,
+                    description=desc,
+                    source=source_file,
+                    sheet=sheet,
+                    row=row,
+                )
+            )
+            continue
+
+        for line in lines:
+            records.append(
+                ViolationRecord(
+                    file=file_path,
+                    line=line,
+                    rule=rule,
+                    description=desc,
+                    source=source_file,
+                    sheet=sheet,
+                    row=row,
+                )
+            )
+    return records
+
+
+def matches_target_path(file_path: str, target_norm: str) -> bool:
+    if not target_norm:
+        return True
+    file_norm = normalize_path(file_path)
+    if target_norm in file_norm:
+        return True
+    assets_index = target_norm.find("assets/")
+    if assets_index >= 0:
+        assets_suffix = target_norm[assets_index:]
+        if assets_suffix in file_norm:
+            return True
+    return False
+
+
+def filter_records_by_path(records: List[ViolationRecord], target_path: Optional[str]) -> List[ViolationRecord]:
+    if not target_path:
+        return records
+    target_norm = normalize_path(target_path)
+    return [record for record in records if matches_target_path(record.file, target_norm)]
+
+
 def load_rule_map(path: Optional[str]) -> Dict[str, str]:
     if not path:
         return {}
@@ -95,7 +201,8 @@ def detect_header(
 
         has_file = "file" in col_map
         has_line = "line" in col_map
-        if score > best_score and (has_file and has_line):
+        has_source = "source_location" in col_map
+        if score > best_score and ((has_file and has_line) or has_source):
             best_score = score
             best_row = offset
             best_map = col_map
@@ -115,6 +222,14 @@ def collect_uwa_records(
         "line": ["line", "line number", "行号", "行", "行数"],
         "rule": ["rule", "规则", "类型", "违规类型", "问题类型", "分类", "检查项"],
         "desc": ["description", "desc", "说明", "描述", "问题", "详情", "原因", "content"],
+        "source_location": [
+            "sourcelocation",
+            "source location",
+            "source_location",
+            "source loc",
+            "资源位置",
+            "源位置",
+        ],
     }
 
     records: List[ViolationRecord] = []
@@ -135,7 +250,7 @@ def collect_uwa_records(
                 if col_idx:
                     col_map[key] = col_idx
 
-            if not header_row or "file" not in col_map or "line" not in col_map:
+            if not header_row:
                 continue
 
             for row_idx, row in enumerate(
@@ -156,14 +271,24 @@ def collect_uwa_records(
                     value = row[col - 1]
                     return "" if value is None else str(value).strip()
 
+                source_val = cell_value("source_location")
+                rule_val = cell_value("rule")
+                desc_val = cell_value("desc")
+                if not rule_val and desc_val:
+                    rule_val = desc_val
+
+                source_records = parse_source_location(
+                    source_val, rule_val, desc_val, str(file_path), sheet.title, row_idx
+                )
+                if source_records:
+                    records.extend(source_records)
+                    continue
+
                 file_val = cell_value("file")
                 if not file_val:
                     continue
 
                 line_val = cell_value("line")
-                rule_val = cell_value("rule")
-                desc_val = cell_value("desc")
-
                 record = ViolationRecord(
                     file=file_val,
                     line=parse_line_number(line_val),
@@ -258,6 +383,8 @@ def main():
     parser.add_argument("--line-col", type=int, help="行号列(1-based)")
     parser.add_argument("--rule-col", type=int, help="规则列(1-based)")
     parser.add_argument("--desc-col", type=int, help="描述列(1-based)")
+    parser.add_argument("--source-col", type=int, help="sourceLocation列(1-based)")
+    parser.add_argument("--target-path", help="仅对比指定路径下的文件")
     parser.add_argument("--export-csv", action="store_true", help="额外导出CSV")
 
     args = parser.parse_args()
@@ -280,6 +407,7 @@ def main():
         "line": args.line_col,
         "rule": args.rule_col,
         "desc": args.desc_col,
+        "source_location": args.source_col,
     }
 
     rule_map = load_rule_map(args.rule_map)
@@ -292,6 +420,9 @@ def main():
         args.max_header_scan,
     )
     local_records = collect_local_records(Path(args.local_json))
+    if args.target_path:
+        uwa_records = filter_records_by_path(uwa_records, args.target_path)
+        local_records = filter_records_by_path(local_records, args.target_path)
 
     uwa_by_file: Dict[str, List[ViolationRecord]] = {}
     for record in uwa_records:
@@ -393,6 +524,7 @@ def main():
             "only_local": len(only_local),
             "only_uwa": len(only_uwa),
             "ambiguous": len(ambiguous),
+            "target_path": args.target_path or "",
         },
         "matches": matches,
         "only_local": only_local,
