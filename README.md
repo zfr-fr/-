@@ -23,3 +23,8 @@ Optional overrides:
 - `--strip-prefix` to remove path prefixes before comparison (repeatable)
 - `--path-anchor` to trim to a path anchor like `Assets/` (repeatable)
 - `--rule-map` to provide an explicit Excel-to-rule mapping
+
+Notes:
+
+- Only files under `--project-root` are compared. Entries outside that path
+  are ignored in both JSON and Excel data.

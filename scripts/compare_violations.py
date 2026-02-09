@@ -107,14 +107,48 @@ class PathNormalizer:
         anchors: Sequence[str],
     ) -> None:
         self.project_root = project_root
+        self.project_root_norm = normalize_slashes(str(project_root)).rstrip("/")
+        self.project_root_norm_lower = self.project_root_norm.lower()
         self.strip_prefixes = [
             normalize_slashes(prefix).rstrip("/")
             for prefix in strip_prefixes
             if prefix
         ]
         self.anchors = [normalize_slashes(anchor).strip("/") for anchor in anchors if anchor]
+        self.anchor_tails = self._build_anchor_tails()
         self.display_by_key: Dict[str, str] = {}
         self.candidates_by_key: Dict[str, List[Path]] = {}
+
+    def _build_anchor_tails(self) -> List[str]:
+        tails: List[str] = []
+        for anchor in self.anchors:
+            anchor_lower = anchor.lower()
+            index = self.project_root_norm_lower.find(anchor_lower)
+            if index != -1:
+                tail = self.project_root_norm[index:].rstrip("/")
+                tails.append(tail)
+        return tails
+
+    def is_in_scope(self, raw_path: str) -> bool:
+        path = normalize_slashes(raw_path.strip().strip('"')).rstrip("/")
+        if not path:
+            return False
+        path_lower = path.lower()
+        if is_abs(path):
+            if path_lower == self.project_root_norm_lower:
+                return True
+            return path_lower.startswith(self.project_root_norm_lower + "/")
+        for anchor in self.anchors:
+            anchor_lower = anchor.lower()
+            if path_lower == anchor_lower or path_lower.startswith(anchor_lower + "/"):
+                if not self.anchor_tails:
+                    return False
+                for tail in self.anchor_tails:
+                    tail_lower = tail.lower()
+                    if path_lower == tail_lower or path_lower.startswith(tail_lower + "/"):
+                        return True
+                return False
+        return True
 
     def normalize_display(self, raw_path: str) -> str:
         path = normalize_slashes(raw_path.strip().strip('"'))
@@ -288,6 +322,8 @@ def load_excel_violations(
                 continue
             value = row[column_index - 1]
             for path_value, line_number in parse_ext_attr1(value):
+                if not normalizer.is_in_scope(path_value):
+                    continue
                 key = normalizer.register(path_value)
                 results.add((key, line_number))
         return results
@@ -302,6 +338,8 @@ def load_json_violations(
         data = json.load(handle)
     results: Dict[str, Set[Tuple[str, int]]] = {}
     for file_path, rule, line_number in iter_json_violations(data):
+        if not normalizer.is_in_scope(file_path):
+            continue
         key = normalizer.register(file_path)
         results.setdefault(rule, set()).add((key, line_number))
     return results
