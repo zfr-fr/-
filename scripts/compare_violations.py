@@ -24,6 +24,8 @@ LINE_NUMBER_RE = re.compile(r"\d+")
 WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
 TOKEN_RE = re.compile(r'"([^"]*)"|([A-Za-z]{1,3}\d+)')
 QUOTED_RE = re.compile(r'"([^"]*)"')
+PATH_IN_SEGMENT_RE = re.compile(r"([A-Za-z0-9_./\\\\-]+?\\.cs)", re.IGNORECASE)
+ZERO_WIDTH_CHARS = "\ufeff\u200b\u200e\u200f"
 
 
 DEFAULT_RULE_KEYWORDS: Dict[str, List[str]] = {
@@ -113,12 +115,21 @@ class ExcelSheetInfo:
     header_row: Optional[int]
     column_index: Optional[int]
     parsed_entries: int
+    raw_entries: int
     non_empty_cells: int
     sample_values: List[str] = field(default_factory=list)
 
 
+def clean_text(value: str) -> str:
+    if not value:
+        return ""
+    for char in ZERO_WIDTH_CHARS:
+        value = value.replace(char, "")
+    return value.strip()
+
+
 def normalize_slashes(value: str) -> str:
-    return value.replace("\\", "/")
+    return clean_text(value).replace("\\", "/")
 
 
 def normalize_delimiters(value: str) -> str:
@@ -360,16 +371,28 @@ def parse_ext_attr1(value: object) -> Iterable[Tuple[str, int]]:
     if value is None:
         return []
     text = normalize_delimiters(str(value)).replace("\n", ";").replace("\r", ";")
+    text = clean_text(text)
     results: List[Tuple[str, int]] = []
     for segment in text.split(";"):
-        segment = segment.strip()
-        if not segment or ":" not in segment:
+        segment = clean_text(segment)
+        if not segment:
             continue
-        path_part, line_part = segment.rsplit(":", 1)
-        path_part = path_part.strip()
+        if ":" in segment:
+            path_part, line_part = segment.rsplit(":", 1)
+            path_part = clean_text(path_part)
+            if not path_part:
+                continue
+            for number in parse_line_numbers(line_part):
+                results.append((path_part, number))
+            continue
+        match = PATH_IN_SEGMENT_RE.search(segment)
+        if not match:
+            continue
+        path_part = clean_text(match.group(1))
         if not path_part:
             continue
-        for number in parse_line_numbers(line_part):
+        trailing = segment[match.end() :]
+        for number in parse_line_numbers(trailing):
             results.append((path_part, number))
     return results
 
@@ -449,6 +472,7 @@ def load_excel_violations(
                             header_row=None,
                             column_index=None,
                             parsed_entries=0,
+                            raw_entries=0,
                             non_empty_cells=0,
                             sample_values=[],
                         )
@@ -459,6 +483,7 @@ def load_excel_violations(
             before_count = len(results)
             non_empty_cells = 0
             sample_values: List[str] = []
+            raw_entries = 0
             for row in sheet.iter_rows(min_row=header_row + 1, values_only=False):
                 if not row or len(row) < column_index:
                     continue
@@ -494,6 +519,7 @@ def load_excel_violations(
                 if not value:
                     continue
                 for path_value, line_number in parse_ext_attr1(value):
+                    raw_entries += 1
                     in_scope = normalizer.is_in_scope(path_value)
                     if scope_stats:
                         scope_stats.record(f"{path_value}:{line_number}", in_scope, scope_limit)
@@ -509,6 +535,7 @@ def load_excel_violations(
                         header_row=header_row,
                         column_index=column_index,
                         parsed_entries=parsed_entries,
+                        raw_entries=raw_entries,
                         non_empty_cells=non_empty_cells,
                         sample_values=sample_values,
                     )
@@ -800,7 +827,7 @@ def main() -> int:
                 else:
                     print(
                         f"  - Sheet {info.sheet}: ext_attr1 at row {info.header_row}, "
-                        f"col {info.column_index}, parsed {info.parsed_entries}, "
+                        f"col {info.column_index}, raw {info.raw_entries}, parsed {info.parsed_entries}, "
                         f"non-empty {info.non_empty_cells}"
                     )
                     if info.sample_values:
