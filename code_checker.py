@@ -460,7 +460,9 @@ class CodeChecker:
     def _extract_line_number(self, line_str: str) -> Optional[int]:
         try:
             patterns = [
+                r"L\s*(\d+)\s*:",
                 r"L(\d+):",
+                r"L\s*(\d+)",
                 r"第(\d+)行",
                 r"line\s*(\d+)",
                 r"Line\s*(\d+)",
@@ -480,6 +482,79 @@ class CodeChecker:
         except Exception:
             return None
 
+    def _coerce_line_number(self, value: Any) -> Optional[int]:
+        """将模型返回的line字段转换为整数行号。"""
+        if isinstance(value, int):
+            return value if value >= 0 else None
+
+        if isinstance(value, float):
+            if value >= 0 and float(value).is_integer():
+                return int(value)
+            return None
+
+        if value is None:
+            return None
+
+        value_str = str(value).strip()
+        if not value_str:
+            return None
+
+        if value_str.isdigit():
+            return int(value_str)
+
+        extracted = self._extract_line_number(value_str)
+        return extracted
+
+    def _normalize_code_line(self, content: str) -> str:
+        """
+        归一化代码行用于模糊匹配：
+        1) 去除可能的 Lxxx: 行号前缀
+        2) 去掉包裹引号
+        3) 忽略空白差异
+        """
+        if content is None:
+            return ""
+
+        normalized = str(content).strip()
+        normalized = re.sub(r"^L\s*\d+\s*:\s*", "", normalized, flags=re.IGNORECASE)
+        normalized = normalized.strip().strip("`").strip("\"").strip("'")
+        normalized = re.sub(r"\s+", "", normalized)
+        return normalized
+
+    def _pick_nearest_line(
+        self, candidates: List[int], preferred_line: Optional[int]
+    ) -> Optional[int]:
+        if not candidates:
+            return None
+        if preferred_line is None:
+            return min(candidates)
+        return min(candidates, key=lambda ln: (abs(ln - preferred_line), ln))
+
+    def _find_line_by_content(
+        self,
+        reported_content: str,
+        line_mapping: Dict[int, str],
+        preferred_line: Optional[int] = None,
+    ) -> Optional[int]:
+        target_raw = (reported_content or "").strip()
+        target_norm = self._normalize_code_line(reported_content)
+        if not target_raw and not target_norm:
+            return None
+
+        exact_candidates = []
+        for line_no, content in line_mapping.items():
+            if content.strip() == target_raw and target_raw:
+                exact_candidates.append(line_no)
+        nearest_exact = self._pick_nearest_line(exact_candidates, preferred_line)
+        if nearest_exact is not None:
+            return nearest_exact
+
+        norm_candidates = []
+        for line_no, content in line_mapping.items():
+            if self._normalize_code_line(content) == target_norm and target_norm:
+                norm_candidates.append(line_no)
+        return self._pick_nearest_line(norm_candidates, preferred_line)
+
     def _parse_api_response(
         self, response_text: str, line_mapping: Dict[int, str]
     ) -> List[Violation]:
@@ -497,7 +572,10 @@ class CodeChecker:
             data = json.loads(json_match.group())
             violations = []
             for v in data.get("violations", []):
-                reported_line = v.get("line", 0)
+                if not isinstance(v, dict):
+                    continue
+
+                reported_line = self._coerce_line_number(v.get("line", 0))
                 line_content = v.get("line_content", "")
                 rule = v.get("rule", "")
                 description = v.get("description", "")
@@ -533,7 +611,7 @@ class CodeChecker:
                         print(f"跳过非Debug.Log调用: {line_content}")
                         continue
 
-                if reported_line in line_mapping:
+                if reported_line is not None and reported_line in line_mapping:
                     actual_content = line_mapping[reported_line]
                     violations.append(
                         Violation(
@@ -544,6 +622,32 @@ class CodeChecker:
                         )
                     )
                     continue
+
+                # 处理模型按0-based或偏移返回的极小行号误差（仅在内容可对齐时生效）
+                if reported_line is not None and line_content:
+                    target_norm = self._normalize_code_line(line_content)
+                    matched_by_neighbor = False
+                    for delta in (-1, 1):
+                        candidate_line = reported_line + delta
+                        if candidate_line in line_mapping:
+                            if (
+                                self._normalize_code_line(line_mapping[candidate_line])
+                                == target_norm
+                            ):
+                                actual_content = line_mapping[candidate_line]
+                                violations.append(
+                                    Violation(
+                                        line=candidate_line,
+                                        line_content=actual_content,
+                                        rule=rule,
+                                        description=description,
+                                    )
+                                )
+                                matched_by_neighbor = True
+                                break
+
+                    if matched_by_neighbor:
+                        continue
 
                 extracted_line = self._extract_line_number(description)
                 if extracted_line and extracted_line in line_mapping:
@@ -571,13 +675,29 @@ class CodeChecker:
                     )
                     continue
 
+                matched_line = self._find_line_by_content(
+                    line_content, line_mapping, preferred_line=reported_line
+                )
+                if matched_line is not None:
+                    actual_content = line_mapping[matched_line]
+                    violations.append(
+                        Violation(
+                            line=matched_line,
+                            line_content=actual_content,
+                            rule=rule,
+                            description=description,
+                        )
+                    )
+                    continue
+
                 print(
                     "警告: 无法确定行号映射 for line "
                     f"{reported_line} with content '{line_content}'"
                 )
+                fallback_line = reported_line if reported_line is not None else 0
                 violations.append(
                     Violation(
-                        line=reported_line,
+                        line=fallback_line,
                         line_content=line_content,
                         rule=rule,
                         description=description,
